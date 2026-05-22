@@ -200,7 +200,7 @@ func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, p
 	if err != nil {
 		return fmt.Errorf("failed to create http request: %w", err)
 	}
-	req.Header.Set("User-Agent", "xyz-dl/1.0.0 (Go-HTTP-Client; cross-platform)")
+	req.Header.Set("User-Agent", "xyz-dl/0.0.1 (Go-HTTP-Client; cross-platform)")
 	if localSize > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", localSize))
 	}
