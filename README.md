@@ -1,6 +1,6 @@
-# xyz-dl：高并发、零依赖、跨平台播客批量下载利器 🚀
+# xyz-dl
 
-```
+```text
 __   __ __   __  ______        _____   _      
 \ \ / / \ \ / / |___  /  ___  |  __ \ | |     
  \ V /   \ V /     / /  |___| | |  | || |     
@@ -9,154 +9,97 @@ __   __ __   __  ______        _____   _
 /_/ \_\   |_|   /_____|       |_____/ |______|
 ```
 
-`xyz-dl` 是一款专门为**小宇宙播客（及通用 RSS 订阅源）**量身打造的高性能、高颜值、跨平台命令行（CLI）批量下载工具。
-
-基于 **Go 语言（Golang）** 编写，编译后仅生成**单一静态二进制可执行文件**。用户**无需安装任何 Python、Node.js 运行时或复杂虚拟环境**，开箱即用，支持 HTTP Range 高级**断点续传（Breakpoint Resume）**，并能同步一键将单集的文字 Shownotes 转换为带 YAML 封装的 Markdown 电子书稿件。
-
----
-
-## ✨ 核心特性
-
-- 🚀 **高并发极速下载**：基于 Goroutine 协程池调度，默认 3 线程并发（可自由配置），榨干带宽。
-- ⏯️ **断点续传引擎**：物理探测本地未完成文件，自适应 Range 请求断点拼接。若服务器不支持断点，则自适应无缝回滚，100% 杜绝文件损坏。
-- 📝 **Shownotes 智能同步**：自动将单集文字简介生成为同名 `.md` 格式文件，并在头部优雅嵌入 YAML Front Matter 元数据（包含标题、发布时间、音频直链等）。
-- 🎨 **安全直观命名**：忽略补零序号，直接以单集的真实标题命名音频文件；使用空间级空格美化算法安全清洗 Windows 禁用的特殊字符，文件名清爽干净。
-- 🔍 **双运行模式**：
-  - **全自动批量模式**：一行命令直接并发拉取。
-  - **极酷交互模式**：启动终端多选复选框，使用键盘上下键和空格键精准勾选下载，WOW 点满满。
-- 📦 **零依赖跨平台**：静态二进制无缝运行在 Windows 和 Linux 系统下，体积仅几 MB，极易嵌入各类自动化工作流中。
+`xyz-dl` 是一个跨平台、零依赖的命令行播客批量下载工具。
+由 Go 语言编写，编译为单一静态文件，开箱即用。支持多线程并发、HTTP Range 断点续传，以及一键导出播客的 Shownotes 为 Markdown 文本。
 
 ---
 
-## 💾 极速安装与写入环境变量
+## 特性
 
-### 1. Windows 系统配置指南
-您可以直接将 `xyz-dl.exe` 放置在系统任意位置，并将其所在的文件夹路径写入系统的 `PATH` 环境变量中，实现在全局命令行随时调用：
-
-1. 创建一个全局工具文件夹（例如 `C:\Tools\`），将 `xyz-dl.exe` 放入其中。
-2. 以**管理员身份**打开 PowerShell，执行以下命令即可一键永久写入用户环境变量：
-   ```powershell
-   [System.Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Tools", "User")
-   ```
-3. 重开终端，即可在任意文件夹下直接运行 `xyz-dl`。
-
-### 2. Linux 系统配置指南
-1. 将编译出的 `xyz-dl` 二进制包放置于 `/usr/local/bin/` 目录下：
-   ```bash
-   sudo mv xyz-dl /usr/local/bin/
-   ```
-2. 赋予该文件可执行权限：
-   ```bash
-   sudo chmod +x /usr/local/bin/xyz-dl
-   ```
-3. 在任意目录下直接运行 `xyz-dl`。
+- **并发与断点续传**：基于协程池调度并发下载任务。自动探测本地文件大小进行断点续传；若服务端不支持 Range，自动回退全量下载。
+- **智能交互向导**：直接运行 `xyz-dl`（或在 Windows 下双击 `xyz-dl.exe`）即可进入控制台向导，支持批量勾选与一键全选。
+- **自动化支持**：在命令行传入子命令参数时转为纯静默运行，适合集成入 CI/CD 或定时脚本。
+- **安全落地**：使用 `.downloading` 临时后缀进行原子写入，确保文件完整。内置 `context` 优雅关闭机制，随时 Ctrl+C 安全中断不留脏数据。
+- **智能去重命名**：按需进行文件名去重，并安全清洗系统禁用字符，保留干净整洁的原始文件名。
+- **元数据导出**：自动将单集文字简介生成同名 `.md` 格式文件，并在头部嵌入 YAML Front Matter 元数据。
 
 ---
 
-## 🔍 如何获取播客 RSS 订阅链接
+## 安装
 
-在使用 `xyz-dl` 时，您需要提供播客的原始 **RSS 订阅链接**。以下是获取 RSS 订阅链接的两种主流且高效的方法：
+您可以将下载的二进制文件添加到系统环境变量中以便全局调用。
 
-### 方法一：通过 iTunes (Apple Podcasts) 获取与转换
-Apple Podcasts 是全球最完整的播客节目库，几乎所有主流播客在此都有收录。
-1. **获取 iTunes 链接**：
-   - 打开 Apple Podcasts（应用或网页版），搜索并找到目标播客。
-   - 点击 **分享 (Share)** 按钮，复制节目链接。链接格式通常为：
-     `https://podcasts.apple.com/cn/podcast/播客名称/id1234567890`
-2. **转换为 RSS 链接**：
-   - 使用免费的第三方转换工具（例如 [GetPodcast.xyz](https://getpodcast.xyz/) 或 [RSS.xyz](https://rss.xyz/)）。
-   - 将复制的 iTunes 链接粘贴进去，工具将立即解析并生成标准的播客 RSS 订阅链接（如 `https://feed.xyzfm.space/...` 或 `https://pub.xyzcdn.net/...`）。
-
-### 方法二：通过 NeoDB 平台直接复制
-[NeoDB](https://neodb.social/) 是一个开放、联邦化的书影音及播客标记平台，为收录的播客提供了直接的 RSS 信息展示。
-1. **搜索播客**：
-   - 访问 NeoDB 官方网站（[neodb.social](https://neodb.social/)）。
-   - 在搜索框中输入想下载的播客名称，并确保筛选分类为 **播客 (Podcast)**。
-2. **复制 RSS 链接**：
-   - 点击进入该播客的详情页面。
-   - 在页面信息展示区域（通常在播客封面图下方或元数据列表里），您会看到一个标有 **RSS** 图标或写有 **"订阅源 / Feed"** 的链接。
-   - 鼠标右键点击该链接并选择 **复制链接地址 (Copy Link Address)**，即可直接获得可以直接在 `xyz-dl` 中使用的原始 RSS 链接。
-
----
-
-## 🛠️ 命令使用指南
-
-### 1. `info` 子命令：获取播客源元数据
-解析指定的播客订阅源，在控制台高颜值展示播客作者、封面图、简介和最新 10 期节目。
-
-*   **标准展示**：
-    ```bash
-    xyz-dl info "https://feed.xyzfm.space/7neh8whbtc9w"
-    ```
-*   **JSON 自动化对接**（带 `-j` 或 `--json` 参数）：
-    直接以标准的 JSON 字符串输出完整的 Podcast 对象和单集 Episode 切片，非常适合流水线和第三方工具批量整合调用。
-    ```bash
-    xyz-dl info "https://feed.xyzfm.space/7neh8whbtc9w" -j
-    ```
-
-### 2. `download` 子命令：高并发批量下载
-批量下载播客音频，并同步保存同名 Shownotes。
-
-*   **默认批量下载**（默认下载全部，3 并发上限，保存在 `./Downloads` 下）：
-    ```bash
-    xyz-dl download "https://feed.xyzfm.space/7neh8whbtc9w"
-    ```
-*   **交互式复选框勾选模式**（带 `-i` 或 `--interactive` 选项，**墙裂推荐！**）：
-    终端自动弹出一屏精美的复选框列表，支持上下键移动，`空格键`勾选/取消，`回车键`确认，助您精准下载想要收听的任意期目。
-    ```bash
-    xyz-dl download "https://feed.xyzfm.space/7neh8whbtc9w" -i
-    ```
-*   **高自定义参数下载**：
-    *   `-o` / `--output`：自定义下载存放根目录。
-    *   `-p` / `--concurrency`：指定最大并发限制协程数。
-    *   `-l` / `--limit`：指定仅下载最新发布的 N 期节目。
-    ```bash
-    # 示例：以 5 个线程并发下载最新 5 期节目，保存在 D:/MyPodcasts 下
-    xyz-dl download "https://feed.xyzfm.space/7neh8whbtc9w" -o "D:/MyPodcasts" -p 5 -l 5
-    ```
-
----
-
-## 📂 磁盘交付成果效果展示
-
-当您完成下载后，`xyz-dl` 会自动在指定目录下以播客的真实标题创建专属的子文件夹。目录内文件呈现出极雅致的布局效果：
-
+**Windows:**
+将 `xyz-dl.exe` 放入任意目录（如 `C:\Tools\`），以管理员身份打开 PowerShell 执行：
+```powershell
+[System.Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Tools", "User")
 ```
+
+**Linux / macOS:**
+```bash
+sudo mv xyz-dl /usr/local/bin/
+sudo chmod +x /usr/local/bin/xyz-dl
+```
+
+---
+
+## 获取播客 RSS 链接
+
+本工具需要提供播客的原始 RSS 订阅链接。推荐通过 **NeoDB** 获取：
+
+1. 访问 [NeoDB](https://neodb.social/)，搜索目标播客（筛选分类为“播客”）。
+2. 进入播客详情页。
+3. 在信息展示区域找到 **RSS** 图标或 **订阅源 / Feed** 链接。
+4. 右键选择 **复制链接地址**。
+
+---
+
+## 使用说明
+
+### 1. 交互模式 (向导界面)
+
+在 Windows 环境下，直接双击运行 `xyz-dl.exe`（或者在终端无参数运行 `xyz-dl`）。
+程序会启动交互向导，按提示粘贴 RSS 链接，即可通过上下键和空格勾选要下载的单集（支持一键全选），并可选择是否同时导出 Markdown 元数据。
+
+### 2. 自动化模式 (命令行)
+
+#### 获取信息 (`info`)
+解析播客源并展示作者、简介和最新单集列表。支持输出为 JSON。
+```bash
+xyz-dl info "https://feed.xyzfm.space/7neh8whbtc9w"
+xyz-dl info "https://feed.xyzfm.space/7neh8whbtc9w" --json
+```
+
+#### 批量下载 (`download`)
+执行无干预的静默并发下载，适合脚本调用。
+```bash
+# 默认配置下载全部
+xyz-dl download "https://feed.xyzfm.space/7neh8whbtc9w"
+
+# 自定义参数下载（例如并发数为 5，只下载最新 5 期，不导出 shownotes）
+xyz-dl download "https://feed.xyzfm.space/7neh8whbtc9w" -o "./MyPodcasts" -p 5 -l 5 -m=false
+```
+
+**参数说明**：
+- `-o`, `--output`: 音频与 Shownotes 的根输出目录（默认 `./Downloads`）
+- `-p`, `--concurrency`: 并发下载的协程数上限（默认 3）
+- `-l`, `--limit`: 仅下载最新发布的前 N 期单集（默认 0，表示下载全部）
+- `-m`, `--meta`: 是否同时下载并保存单集的 Markdown 元数据（默认 true）
+
+---
+
+## 下载目录结构
+
+下载完成后，工具会以播客真实标题创建子目录，结构如下：
+
+```text
 D:/MyPodcasts/
-└── 慧客堂/
-    ├── Vol.87 为了转岗，我在大厂等了8年：饭碗和自由怎么选？.m4a  [80.38 MB 音频]
-    ├── Vol.87 为了转岗，我在大厂等了8年：饭碗和自由怎么选？.md   [文字 Shownotes 稿]
-    ├── Vol.88 跌了你不敢，涨了你眼馋？牛市进宝山，别再空手还！.m4a  [92.02 MB 音频]
-    └── Vol.88 跌了你不敢，涨了你眼馋？牛市进宝山，别再空手还！.md   [文字 Shownotes 稿]
+└── 播客名称/
+    ├── 单集标题.m4a
+    ├── 单集标题.md
+    ├── 重名单集标题 (1).m4a
+    └── 重名单集标题 (1).md
 ```
 
-### Shownotes Markdown 电子书稿结构示例：
-```markdown
----
-title: "Vol.88 跌了你不敢，涨了你眼馋？牛市进宝山，别再空手还！"
-pubDate: "Wed, 20 May 2026 16:00:00 GMT"
-audioURL: "https://media.xyzcdn.net/..."
-length: 96493450 bytes
-exportTime: "2026-05-22 15:14:00"
----
-
-# Vol.88 跌了你不敢，涨了你眼馋？牛市进宝山，别再空手还！
-
-## 单集介绍 (Shownotes)
-
-[这里会动态写入这期播客极其整洁、没有杂质的文字 Shownotes 介绍...]
-```
-
----
-
-## 🛡️ 防御性安全说明
-
-`xyz-dl` 在底层融入了深厚的高可用防御设计，保障在恶劣系统条件下的绝对安全：
-1.  **Windows 非法文件名彻底阻断**：自动转换 Windows 非法字符为单空格，并采用 Rune 级别进行 120 长度的安全截断，彻底避免中文字符在字节级截断时产生半个汉字乱码，同时完美兼容了 `MAX_PATH` 260 字节的超长路径限制。
-2.  **XML 内存溢出防御（XML Bomb）**：拉取 RSS 源时设置了标准的 `io.LimitReader`（上限 30MB）和 30s 强制请求超时。即便 RSS 包含恶意百吉字节级 XML 展开炸弹，也绝不可能引发机器内存爆裂。
-3.  **Range 支持度安全降级**：若遇到不支持 Range 部分下载的古老服务器，下载引擎会自动截断已下载的临时文件，无缝回退到从头全量拉取模式，强力扼杀文件损坏。
-
----
-
-## 📜 授权许可
-本项目基于 **MIT License** 开放。欢迎随时进行二次分发、修改与嵌入您自己的自动化批处理工具流中。
+## 许可
+MIT License

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,6 +16,7 @@ import (
 	"xyz-dl/pkg/parser"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -168,7 +170,7 @@ func runInteractiveWizard(ctx context.Context) {
 		case "🚀 下载播客":
 			err := runInteractiveDownload(ctx)
 			if err != nil {
-				if err != context.Canceled && err.Error() != "interrupt" {
+				if err != context.Canceled && !errors.Is(err, terminal.InterruptErr) {
 					fmt.Printf("\n[发生错误] %v\n", err)
 				}
 			}

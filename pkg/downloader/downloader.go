@@ -97,6 +97,9 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 
 		go func(task DownloadTask) {
 			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("[致命异常] 单集 '%s' 内部发生崩溃并被拦截: %v\n", task.UniqueTitle, r)
+				}
 				<-sem // 释放槽位
 				wg.Done()
 			}()
@@ -256,8 +259,10 @@ func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, p
 		return fmt.Errorf("download interrupted: %w", err)
 	}
 
-	// 安全关闭文件句柄，确保能在 Windows 下正常 rename
-	out.Close()
+	// 安全关闭文件句柄，确保能在 Windows 下正常 rename，并拦截磁盘 Flush 错误
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("failed to flush and close file: %w", err)
+	}
 
 	// 7. 下载成功，原子重命名为最终扩展名
 	if err := os.Rename(tempAudioPath, audioPath); err != nil {
