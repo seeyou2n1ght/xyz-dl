@@ -63,7 +63,7 @@ func TestDownloader(t *testing.T) {
 
 	// 3. 运行测试套件
 	t.Run("Full Download and Shownotes Export", func(t *testing.T) {
-		dl := NewDownloader(tempDir, 1, 0)
+		dl := NewDownloader(tempDir, 1, 0, true)
 		podcast := &parser.Podcast{
 			Title:  "TestPodcast",
 			Author: "Tester",
@@ -121,7 +121,7 @@ func TestDownloader(t *testing.T) {
 			t.Fatalf("failed to create breakpoint file: %v", err)
 		}
 
-		dl := NewDownloader(resumeDir, 1, 0)
+		dl := NewDownloader(resumeDir, 1, 0, true)
 		podcast := &parser.Podcast{
 			Title:  "TestPodcast",
 			Author: "Tester",

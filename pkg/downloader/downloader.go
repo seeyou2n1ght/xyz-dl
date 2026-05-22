@@ -24,10 +24,11 @@ type Downloader struct {
 	OutputDir   string // 音频与 Shownotes 的根输出目录
 	Concurrency int    // 最大并发协程数限制
 	Limit       int    // 下载最新单集的限制数量 (0 表示全部下载)
+	SaveMeta    bool   // 是否保存 Markdown Shownotes
 }
 
 // NewDownloader 实例化并配置一个下载器，同时提供边界校验与默认值兜底。
-func NewDownloader(outputDir string, concurrency int, limit int) *Downloader {
+func NewDownloader(outputDir string, concurrency int, limit int, saveMeta bool) *Downloader {
 	// 防错兜底
 	if outputDir == "" {
 		outputDir = "./Downloads"
@@ -39,6 +40,7 @@ func NewDownloader(outputDir string, concurrency int, limit int) *Downloader {
 		OutputDir:   outputDir,
 		Concurrency: concurrency,
 		Limit:       limit,
+		SaveMeta:    saveMeta,
 	}
 }
 
@@ -122,9 +124,11 @@ func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, p
 	mdPath := filepath.Join(podcastFolder, uniqueTitle+".md")
 
 	// 1. 保存 Shownotes (文字介绍) 为 Markdown
-	if err := d.saveShownotes(mdPath, ep, uniqueTitle); err != nil {
-		// 容错：Shownotes 失败不应该打断音频的下载
-		fmt.Printf("[警告] 保存 Shownotes 失败 %s: %v\n", ep.Title, err)
+	if d.SaveMeta {
+		if err := d.saveShownotes(mdPath, ep, uniqueTitle); err != nil {
+			// 容错：Shownotes 失败不应该打断音频的下载
+			fmt.Printf("[警告] 保存 Shownotes 失败 %s: %v\n", ep.Title, err)
+		}
 	}
 
 	// 2. 音频断点状态探测

@@ -32,6 +32,7 @@ __   __ __   __  ______        _____   _
 	concurrency int
 	limit       int
 	asJSON      bool
+	saveMeta    bool
 )
 
 func main() {
@@ -94,11 +95,12 @@ func main() {
 				return err
 			}
 
-			dl := downloader.NewDownloader(outputDir, concurrency, limit)
+			dl := downloader.NewDownloader(outputDir, concurrency, limit, saveMeta)
 			return dl.DownloadPodcast(ctx, podcast)
 		},
 	}
 	downloadCmd.Flags().StringVarP(&outputDir, "output", "o", "./Downloads", "音频与 Shownotes 的根输出目录")
+	downloadCmd.Flags().BoolVarP(&saveMeta, "meta", "m", true, "是否同时导出 Shownotes 元数据为 Markdown 文件")
 	downloadCmd.Flags().IntVarP(&concurrency, "concurrency", "p", 3, "批量下载的最大并发协程数上限")
 	downloadCmd.Flags().IntVarP(&limit, "limit", "l", 0, "仅下载最新发布的前 N 期单集 (0 表示下载全部)")
 
@@ -268,6 +270,12 @@ func runInteractiveDownload(ctx context.Context) error {
 		Default: "./Downloads",
 	}, &outDir)
 
-	dl := downloader.NewDownloader(outDir, 3, 0)
+	// 交互模式下询问是否保存元数据
+	survey.AskOne(&survey.Confirm{
+		Message: "是否同时下载并保存单集元数据为 Markdown 文件 (Shownotes)?",
+		Default: true,
+	}, &saveMeta)
+
+	dl := downloader.NewDownloader(outDir, 3, 0, saveMeta)
 	return dl.DownloadPodcast(ctx, podcast)
 }
