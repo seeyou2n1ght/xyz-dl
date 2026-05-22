@@ -52,6 +52,32 @@ __  __ ____  ____     ____  _
 
 ---
 
+## 🔍 如何获取播客 RSS 订阅链接
+
+在使用 `xyz-dl` 时，您需要提供播客的原始 **RSS 订阅链接**。以下是获取 RSS 订阅链接的两种主流且高效的方法：
+
+### 方法一：通过 iTunes (Apple Podcasts) 获取与转换
+Apple Podcasts 是全球最完整的播客节目库，几乎所有主流播客在此都有收录。
+1. **获取 iTunes 链接**：
+   - 打开 Apple Podcasts（应用或网页版），搜索并找到目标播客。
+   - 点击 **分享 (Share)** 按钮，复制节目链接。链接格式通常为：
+     `https://podcasts.apple.com/cn/podcast/播客名称/id1234567890`
+2. **转换为 RSS 链接**：
+   - 使用免费的第三方转换工具（例如 [GetPodcast.xyz](https://getpodcast.xyz/) 或 [RSS.xyz](https://rss.xyz/)）。
+   - 将复制的 iTunes 链接粘贴进去，工具将立即解析并生成标准的播客 RSS 订阅链接（如 `https://feed.xyzfm.space/...` 或 `https://pub.xyzcdn.net/...`）。
+
+### 方法二：通过 NeoDB 平台直接复制
+[NeoDB](https://neodb.social/) 是一个开放、联邦化的书影音及播客标记平台，为收录的播客提供了直接的 RSS 信息展示。
+1. **搜索播客**：
+   - 访问 NeoDB 官方网站（[neodb.social](https://neodb.social/)）。
+   - 在搜索框中输入想下载的播客名称，并确保筛选分类为 **播客 (Podcast)**。
+2. **复制 RSS 链接**：
+   - 点击进入该播客的详情页面。
+   - 在页面信息展示区域（通常在播客封面图下方或元数据列表里），您会看到一个标有 **RSS** 图标或写有 **"订阅源 / Feed"** 的链接。
+   - 鼠标右键点击该链接并选择 **复制链接地址 (Copy Link Address)**，即可直接获得可以直接在 `xyz-dl` 中使用的原始 RSS 链接。
+
+---
+
 ## 🛠️ 命令使用指南
 
 ### 1. `info` 子命令：获取播客源元数据
