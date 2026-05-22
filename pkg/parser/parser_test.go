@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -47,7 +48,7 @@ func TestFetchAndParseRSS(t *testing.T) {
 
 	// 3. 运行测试
 	t.Run("Valid RSS Feed", func(t *testing.T) {
-		podcast, err := FetchAndParseRSS(server.URL)
+		podcast, err := FetchAndParseRSS(context.Background(), server.URL)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -87,7 +88,7 @@ func TestFetchAndParseRSS(t *testing.T) {
 	})
 
 	t.Run("Empty URL validation", func(t *testing.T) {
-		_, err := FetchAndParseRSS("")
+		_, err := FetchAndParseRSS(context.Background(), "")
 		if err == nil {
 			t.Errorf("expected error for empty URL, got nil")
 		}
@@ -99,7 +100,7 @@ func TestFetchAndParseRSS(t *testing.T) {
 		}))
 		defer errServer.Close()
 
-		_, err := FetchAndParseRSS(errServer.URL)
+		_, err := FetchAndParseRSS(context.Background(), errServer.URL)
 		if err == nil {
 			t.Errorf("expected error for 404 status, got nil")
 		}
@@ -112,7 +113,7 @@ func TestFetchAndParseRSS(t *testing.T) {
 		}))
 		defer malformedServer.Close()
 
-		_, err := FetchAndParseRSS(malformedServer.URL)
+		_, err := FetchAndParseRSS(context.Background(), malformedServer.URL)
 		if err == nil {
 			t.Errorf("expected error for malformed XML, got nil")
 		}

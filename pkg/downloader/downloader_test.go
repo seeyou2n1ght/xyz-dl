@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -77,7 +78,7 @@ func TestDownloader(t *testing.T) {
 			},
 		}
 
-		err := dl.DownloadPodcast(podcast)
+		err := dl.DownloadPodcast(context.Background(), podcast)
 		if err != nil {
 			t.Fatalf("unexpected download error: %v", err)
 		}
@@ -136,7 +137,7 @@ func TestDownloader(t *testing.T) {
 		}
 
 		// 启动续传，应该自动识别断点大小 40 字节，并发送 Range 请求追加剩余 60 字节
-		err = dl.DownloadPodcast(podcast)
+		err = dl.DownloadPodcast(context.Background(), podcast)
 		if err != nil {
 			t.Fatalf("unexpected resume error: %v", err)
 		}

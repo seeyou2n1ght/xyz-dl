@@ -2,6 +2,7 @@
 package parser
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -67,7 +68,7 @@ type XMLEnclosure struct {
 
 // FetchAndParseRSS 动态拉取指定 URL 的 RSS XML 源，并将其解析为规范化的 Podcast 结构体。
 // 它具备 HTTP 超时保护、UA防拦截、状态码校验、数据流限制防内存溢出，以及完美的 Namespace 扁平化免疫过滤。
-func FetchAndParseRSS(feedURL string) (*Podcast, error) {
+func FetchAndParseRSS(ctx context.Context, feedURL string) (*Podcast, error) {
 	// 1. 边界校验：验证 URL 的有效性
 	if feedURL == "" {
 		return nil, fmt.Errorf("feed URL cannot be empty")
@@ -87,7 +88,7 @@ func FetchAndParseRSS(feedURL string) (*Podcast, error) {
 		Timeout: 30 * time.Second,
 	}
 
-	req, err := http.NewRequest("GET", feedURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", feedURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

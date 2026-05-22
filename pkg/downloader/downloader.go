@@ -2,6 +2,7 @@
 package downloader
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,7 +43,7 @@ func NewDownloader(outputDir string, concurrency int, limit int) *Downloader {
 }
 
 // DownloadPodcast 批量并发下载播客频道的音频和 Shownotes，支持 Range 断点续传与终端进度条渲染。
-func (d *Downloader) DownloadPodcast(podcast *parser.Podcast) error {
+func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcast) error {
 	// 1. 创建播客专属的物理子目录
 	podcastFolder := filepath.Join(d.OutputDir, utils.SanitizeFilename(podcast.Title))
 	if err := os.MkdirAll(podcastFolder, 0755); err != nil {
@@ -59,25 +60,53 @@ func (d *Downloader) DownloadPodcast(podcast *parser.Podcast) error {
 	fmt.Printf("[保存路径] %s\n", podcastFolder)
 	fmt.Printf("[并发上限] %d 任务同行\n\n", d.Concurrency)
 
+	// 智能去重机制 (Smart Deduplication)
+	seenTitles := make(map[string]int)
+	type DownloadTask struct {
+		Episode     parser.Episode
+		UniqueTitle string
+	}
+	var tasks []DownloadTask
+	for _, ep := range episodes {
+		cleanTitle := utils.SanitizeFilename(ep.Title)
+		count := seenTitles[cleanTitle]
+		seenTitles[cleanTitle]++
+
+		uniqueTitle := cleanTitle
+		if count > 0 {
+			uniqueTitle = fmt.Sprintf("%s (%d)", cleanTitle, count)
+		}
+		tasks = append(tasks, DownloadTask{Episode: ep, UniqueTitle: uniqueTitle})
+	}
+
 	// 3. 构建有缓冲通道控制协程并发数，使用 WaitGroup 同步
 	sem := make(chan struct{}, d.Concurrency)
 	var wg sync.WaitGroup
 
-	for _, ep := range episodes {
+	for _, task := range tasks {
 		wg.Add(1)
-		sem <- struct{}{} // 抢占槽位
+		
+		select {
+		case sem <- struct{}{}: // 抢占槽位
+		case <-ctx.Done(): // 接收到中断信号
+			wg.Done()
+			continue
+		}
 
-		go func(episode parser.Episode) {
+		go func(task DownloadTask) {
 			defer func() {
 				<-sem // 释放槽位
 				wg.Done()
 			}()
 
 			// 执行单任务物理下载
-			if err := d.downloadEpisode(podcast.Title, podcastFolder, episode); err != nil {
-				fmt.Printf("[下载失败] %s: %v\n", episode.Title, err)
+			if err := d.downloadEpisode(ctx, podcast.Title, podcastFolder, task.Episode, task.UniqueTitle); err != nil {
+				// Avoid printing interruption errors when user hits Ctrl+C
+				if err != context.Canceled {
+					fmt.Printf("[下载失败] %s: %v\n", task.UniqueTitle, err)
+				}
 			}
-		}(ep)
+		}(task)
 	}
 
 	wg.Wait()
@@ -86,14 +115,14 @@ func (d *Downloader) DownloadPodcast(podcast *parser.Podcast) error {
 }
 
 // downloadEpisode 执行单个音频文件的断点续传下载，并导出 YAML 封装的 Markdown Shownotes。
-func (d *Downloader) downloadEpisode(podcastTitle string, podcastFolder string, ep parser.Episode) error {
-	cleanTitle := utils.SanitizeFilename(ep.Title)
+func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, podcastFolder string, ep parser.Episode, uniqueTitle string) error {
 	suffix := getSuffix(ep.AudioURL)
-	audioPath := filepath.Join(podcastFolder, cleanTitle+suffix)
-	mdPath := filepath.Join(podcastFolder, cleanTitle+".md")
+	audioPath := filepath.Join(podcastFolder, uniqueTitle+suffix)
+	tempAudioPath := audioPath + ".downloading"
+	mdPath := filepath.Join(podcastFolder, uniqueTitle+".md")
 
 	// 1. 保存 Shownotes (文字介绍) 为 Markdown
-	if err := d.saveShownotes(mdPath, ep); err != nil {
+	if err := d.saveShownotes(mdPath, ep, uniqueTitle); err != nil {
 		// 容错：Shownotes 失败不应该打断音频的下载
 		fmt.Printf("[警告] 保存 Shownotes 失败 %s: %v\n", ep.Title, err)
 	}
@@ -103,18 +132,22 @@ func (d *Downloader) downloadEpisode(podcastTitle string, podcastFolder string, 
 	var fileFlags int
 	var fileExists bool
 
+	// 优先检查最终文件是否存在
 	info, err := os.Stat(audioPath)
+	if err == nil && info.Size() == ep.Length {
+		// 态 ①：完全一致，直接跳过
+		fmt.Printf("[已存在] %s%s (下载完整，已跳过)\n", uniqueTitle, suffix)
+		return nil
+	}
+
+	// 检查临时断点文件
+	info, err = os.Stat(tempAudioPath)
 	if err == nil {
 		fileExists = true
 		localSize = info.Size()
-		if localSize == ep.Length {
-			// 态 ①：完全一致，直接跳过
-			fmt.Printf("[已存在] %s%s (下载完整，已跳过)\n", cleanTitle, suffix)
-			return nil
-		}
 		if localSize > ep.Length {
 			// 态 ②：本地比服务端还大（元数据或链接变更），需删除重试
-			_ = os.Remove(audioPath)
+			_ = os.Remove(tempAudioPath)
 			localSize = 0
 			fileExists = false
 		}
@@ -128,7 +161,7 @@ func (d *Downloader) downloadEpisode(podcastTitle string, podcastFolder string, 
 	}
 
 	// 3. 构建高颜值进度条
-	barDescription := fmt.Sprintf("[下载中] %s", cleanTitle)
+	barDescription := fmt.Sprintf("[下载中] %s", uniqueTitle)
 	if len([]rune(barDescription)) > 40 {
 		barDescription = string([]rune(barDescription)[:37]) + "..."
 	}
@@ -156,7 +189,7 @@ func (d *Downloader) downloadEpisode(podcastTitle string, podcastFolder string, 
 		Timeout: 10 * time.Minute, // 10分钟超时保障大音频不被掐断
 	}
 
-	req, err := http.NewRequest("GET", ep.AudioURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", ep.AudioURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create http request: %w", err)
 	}
@@ -167,6 +200,9 @@ func (d *Downloader) downloadEpisode(podcastTitle string, podcastFolder string, 
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("http transfer error: %w", err)
 	}
 	defer resp.Body.Close()
@@ -182,6 +218,9 @@ func (d *Downloader) downloadEpisode(podcastTitle string, podcastFolder string, 
 			resp.Body.Close()
 			resp, err = client.Do(req)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return fmt.Errorf("http transfer error after rollback: %w", err)
 			}
 			defer resp.Body.Close()
@@ -197,23 +236,35 @@ func (d *Downloader) downloadEpisode(podcastTitle string, podcastFolder string, 
 	}
 
 	// 6. 写入本地文件
-	out, err := os.OpenFile(audioPath, fileFlags, 0644)
+	out, err := os.OpenFile(tempAudioPath, fileFlags, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open output file: %w", err)
 	}
 	defer out.Close()
 
-	// 使用 TeeReader 将数据同时泵入本地文件与进度条
-	_, err = io.Copy(out, io.TeeReader(resp.Body, bar))
+	// 使用 io.CopyBuffer 提升 I/O 性能 (1MB buffer)
+	buf := make([]byte, 1024*1024)
+	_, err = io.CopyBuffer(out, io.TeeReader(resp.Body, bar), buf)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("download interrupted: %w", err)
+	}
+
+	// 安全关闭文件句柄，确保能在 Windows 下正常 rename
+	out.Close()
+
+	// 7. 下载成功，原子重命名为最终扩展名
+	if err := os.Rename(tempAudioPath, audioPath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
 	return nil
 }
 
 // saveShownotes 将单集的文字介绍转换为带 YAML Front Matter 的高颜值 Markdown 稿件保存。
-func (d *Downloader) saveShownotes(mdPath string, ep parser.Episode) error {
+func (d *Downloader) saveShownotes(mdPath string, ep parser.Episode, uniqueTitle string) error {
 	// 防御：若 Shownotes 已经存在，则无需重复写入
 	if _, err := os.Stat(mdPath); err == nil {
 		return nil
@@ -232,7 +283,7 @@ exportTime: %q
 ## 单集介绍 (Shownotes)
 
 %s
-`, ep.Title, ep.PubDate, ep.AudioURL, ep.Length, time.Now().Format("2006-01-02 15:04:05"), ep.Title, ep.Description)
+`, uniqueTitle, ep.PubDate, ep.AudioURL, ep.Length, time.Now().Format("2006-01-02 15:04:05"), uniqueTitle, ep.Description)
 
 	return os.WriteFile(mdPath, []byte(content), 0644)
 }
