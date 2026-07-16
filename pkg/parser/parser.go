@@ -93,7 +93,7 @@ func FetchAndParseRSS(ctx context.Context, feedURL string) (*Podcast, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	// 设置标准的 UA 假装是现代浏览器或专业播客拉取端，防止被防爬防火墙拦截
-	req.Header.Set("User-Agent", "xyz-dl/1.0.0 (Go-HTTP-Client; cross-platform)")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
 
 	resp, err := client.Do(req)
 	if err != nil {
