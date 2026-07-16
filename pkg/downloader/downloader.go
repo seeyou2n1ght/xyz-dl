@@ -45,9 +45,11 @@ func NewDownloader(outputDir string, concurrency int, limit int, saveMeta bool) 
 	t.MaxConnsPerHost = 100
 	t.MaxIdleConnsPerHost = 100
 	t.IdleConnTimeout = 90 * time.Second
+	t.ResponseHeaderTimeout = 15 * time.Second
+	t.TLSHandshakeTimeout = 10 * time.Second
 
 	client := &http.Client{
-		Timeout:   10 * time.Minute,
+		// 移除全局 Timeout，依靠 Transport 层的细粒度超时防止大文件下载被粗暴掐断
 		Transport: t,
 	}
 
@@ -61,11 +63,11 @@ func NewDownloader(outputDir string, concurrency int, limit int, saveMeta bool) 
 }
 
 // DownloadPodcast 批量并发下载播客频道的音频和 Shownotes，支持 Range 断点续传与终端进度条渲染。
-func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcast) error {
+func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcast) ([]parser.Episode, error) {
 	// 1. 创建播客专属的物理子目录
 	podcastFolder := filepath.Join(d.OutputDir, utils.SanitizeFilename(podcast.Title))
 	if err := os.MkdirAll(podcastFolder, 0755); err != nil {
-		return fmt.Errorf("failed to create podcast directory %s: %w", podcastFolder, err)
+		return nil, fmt.Errorf("failed to create podcast directory %s: %w", podcastFolder, err)
 	}
 
 	// 2. 限制最新单集下载数量
@@ -104,6 +106,8 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 	)
 	sem := make(chan struct{}, d.Concurrency)
 	var wg sync.WaitGroup
+	var failedEpisodes []parser.Episode
+	var mu sync.Mutex
 
 	for _, task := range tasks {
 		wg.Add(1)
@@ -111,6 +115,9 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 		select {
 		case sem <- struct{}{}: // 抢占槽位
 		case <-ctx.Done(): // 接收到中断信号
+			mu.Lock()
+			failedEpisodes = append(failedEpisodes, task.Episode)
+			mu.Unlock()
 			wg.Done()
 			continue
 		}
@@ -126,35 +133,77 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 
 			// 执行单任务物理下载
 			if err := d.downloadEpisode(ctx, p, podcast.Title, podcastFolder, task.Episode, task.UniqueTitle); err != nil {
-				// Avoid printing interruption errors when user hits Ctrl+C
-				if err != context.Canceled {
-					fmt.Printf("\n[下载失败] %s: %v\n", task.UniqueTitle, err)
-				}
+				mu.Lock()
+				failedEpisodes = append(failedEpisodes, task.Episode)
+				mu.Unlock()
 			}
 		}(task)
 	}
 
 	wg.Wait()
 	p.Wait()
-	fmt.Println("\n[任务完成] 所有播客音频与 Shownotes 文字稿已全部处理完毕！")
-	return nil
+	
+	if len(failedEpisodes) > 0 {
+		fmt.Printf("\n[任务完成] 存在 %d 个单集下载失败或被中断。\n", len(failedEpisodes))
+	} else {
+		fmt.Println("\n[任务完成] 所有播客音频与 Shownotes 文字稿已全部处理完毕！")
+	}
+	return failedEpisodes, nil
 }
 
 // downloadEpisode 执行单个音频文件的断点续传下载，并导出 YAML 封装的 Markdown Shownotes。
-func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podcastTitle string, podcastFolder string, ep parser.Episode, uniqueTitle string) error {
+func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podcastTitle string, podcastFolder string, ep parser.Episode, uniqueTitle string) (err error) {
 	suffix := getSuffix(ep.AudioURL)
 	audioPath := filepath.Join(podcastFolder, uniqueTitle+suffix)
 	tempAudioPath := audioPath + ".downloading"
 	mdPath := filepath.Join(podcastFolder, uniqueTitle+".md")
 
+	// 提前构建多行并发安全的进度条（置于顶层保证发生异常时能够显示失败状态）
+	barTitle := uniqueTitle
+	if len([]rune(barTitle)) > 26 {
+		barTitle = string([]rune(barTitle)[:23]) + "..."
+	}
+	
+	nameDecor := decor.Any(func(s decor.Statistics) string {
+		prefix := "[下载中]"
+		if s.Completed {
+			prefix = "[已完成]"
+		} else if s.Aborted {
+			prefix = "[失败] "
+		}
+		return fmt.Sprintf("%s %s", prefix, barTitle)
+	}, decor.WC{W: 33})
+
+	bar := p.AddBar(ep.Length,
+		mpb.PrependDecorators(
+			nameDecor,
+			decor.CountersKibiByte("% .2f / % .2f", decor.WCSyncSpace),
+		),
+		mpb.AppendDecorators(
+			decor.EwmaETA(decor.ET_STYLE_GO, 90),
+			decor.Name(" ] "),
+			decor.Percentage(decor.WCSyncSpace),
+		),
+	)
+
+	defer func() {
+		if err != nil {
+			bar.Abort(false)
+		} else {
+			// 强制使用实际抓取到的字节数作为最终 Total 阈值，防止 RSS 元数据虚标导致永久假死挂起！
+			bar.SetTotal(bar.Current(), true)
+		}
+	}()
+
 	// 0. 发起 HEAD 请求探测真实文件大小，修复 RSS 元数据与实际大小不符的死循环漏洞
-	headReq, err := http.NewRequestWithContext(ctx, "HEAD", ep.AudioURL, nil)
-	if err == nil {
+	headReq, headErr := http.NewRequestWithContext(ctx, "HEAD", ep.AudioURL, nil)
+	if headErr == nil {
 		headReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-		headResp, err := d.Client.Do(headReq)
-		if err == nil && headResp.StatusCode == http.StatusOK {
+		headResp, doErr := d.Client.Do(headReq)
+		if doErr == nil && headResp.StatusCode == http.StatusOK {
 			if headResp.ContentLength > 0 {
 				ep.Length = headResp.ContentLength
+				bar.SetTotal(ep.Length, false)
 			}
 		}
 		if headResp != nil && headResp.Body != nil {
@@ -164,9 +213,8 @@ func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podca
 
 	// 1. 保存 Shownotes (文字介绍) 为 Markdown
 	if d.SaveMeta {
-		if err := d.saveShownotes(mdPath, ep, uniqueTitle); err != nil {
+		if smErr := d.saveShownotes(mdPath, ep, uniqueTitle); smErr != nil {
 			// 容错：Shownotes 失败不应该打断音频的下载
-			fmt.Printf("\n[警告] 保存 Shownotes 失败 %s: %v\n", ep.Title, err)
 		}
 	}
 
@@ -176,16 +224,16 @@ func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podca
 	var fileExists bool
 
 	// 优先检查最终文件是否存在
-	info, err := os.Stat(audioPath)
-	if err == nil && info.Size() == ep.Length {
+	info, statErr := os.Stat(audioPath)
+	if statErr == nil && info.Size() == ep.Length {
 		// 态 ①：完全一致，直接跳过
-		fmt.Printf("[已存在] %s%s (下载完整，已跳过)\n", uniqueTitle, suffix)
+		bar.SetCurrent(ep.Length)
 		return nil
 	}
 
 	// 检查临时断点文件
-	info, err = os.Stat(tempAudioPath)
-	if err == nil {
+	info, statErr = os.Stat(tempAudioPath)
+	if statErr == nil {
 		fileExists = true
 		localSize = info.Size()
 		if localSize > ep.Length {
@@ -202,24 +250,6 @@ func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podca
 		fileFlags = os.O_CREATE | os.O_WRONLY
 		localSize = 0
 	}
-
-	// 3. 构建多行并发安全的进度条
-	barDescription := fmt.Sprintf("[下载中] %s", uniqueTitle)
-	if len([]rune(barDescription)) > 30 {
-		barDescription = string([]rune(barDescription)[:27]) + "..."
-	}
-
-	bar := p.AddBar(ep.Length,
-		mpb.PrependDecorators(
-			decor.Name(barDescription, decor.WC{W: 32}),
-			decor.CountersKibiByte("% .2f / % .2f", decor.WCSyncSpace),
-		),
-		mpb.AppendDecorators(
-			decor.EwmaETA(decor.ET_STYLE_GO, 90),
-			decor.Name(" ] "),
-			decor.Percentage(decor.WCSyncSpace),
-		),
-	)
 
 	// 补足断点续传的初始进度
 	if localSize > 0 {

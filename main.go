@@ -98,7 +98,14 @@ func main() {
 			}
 
 			dl := downloader.NewDownloader(outputDir, concurrency, limit, saveMeta)
-			return dl.DownloadPodcast(ctx, podcast)
+			failed, err := dl.DownloadPodcast(ctx, podcast)
+			if err != nil {
+				return err
+			}
+			if len(failed) > 0 {
+				return fmt.Errorf("存在 %d 个单集下载失败", len(failed))
+			}
+			return nil
 		},
 	}
 	downloadCmd.Flags().StringVarP(&outputDir, "output", "o", "./Downloads", "音频与 Shownotes 的根输出目录")
@@ -279,5 +286,27 @@ func runInteractiveDownload(ctx context.Context) error {
 	}, &saveMeta)
 
 	dl := downloader.NewDownloader(outDir, 3, 0, saveMeta)
-	return dl.DownloadPodcast(ctx, podcast)
+	failed, err := dl.DownloadPodcast(ctx, podcast)
+	
+	for len(failed) > 0 && err == nil {
+		if ctx.Err() != nil {
+			break
+		}
+		var retryAction string
+		promptRetry := &survey.Select{
+			Message: fmt.Sprintf("检测到有 %d 个单集下载失败，是否立即重试?", len(failed)),
+			Options: []string{"🚀 是，重试失败单集", "🚪 否，放弃退出"},
+		}
+		if errSurvey := survey.AskOne(promptRetry, &retryAction); errSurvey != nil {
+			break
+		}
+		if retryAction == "🚀 是，重试失败单集" {
+			podcast.Episodes = failed
+			failed, err = dl.DownloadPodcast(ctx, podcast)
+		} else {
+			break
+		}
+	}
+	
+	return err
 }
