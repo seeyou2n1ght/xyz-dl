@@ -16,15 +16,17 @@ import (
 	"xyz-dl/pkg/parser"
 	"xyz-dl/pkg/utils"
 
-	"github.com/schollz/progressbar/v3"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 )
 
 // Downloader 承载了批量下载器的全局配置与核心引擎。
 type Downloader struct {
-	OutputDir   string // 音频与 Shownotes 的根输出目录
-	Concurrency int    // 最大并发协程数限制
-	Limit       int    // 下载最新单集的限制数量 (0 表示全部下载)
-	SaveMeta    bool   // 是否保存 Markdown Shownotes
+	OutputDir   string       // 音频与 Shownotes 的根输出目录
+	Concurrency int          // 最大并发协程数限制
+	Limit       int          // 下载最新单集的限制数量 (0 表示全部下载)
+	SaveMeta    bool         // 是否保存 Markdown Shownotes
+	Client      *http.Client // 全局复用的 HTTP 客户端
 }
 
 // NewDownloader 实例化并配置一个下载器，同时提供边界校验与默认值兜底。
@@ -36,11 +38,25 @@ func NewDownloader(outputDir string, concurrency int, limit int, saveMeta bool) 
 	if concurrency <= 0 {
 		concurrency = 3
 	}
+
+	// 配置高可用全局 HTTP 客户端连接池
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 100
+	t.MaxConnsPerHost = 100
+	t.MaxIdleConnsPerHost = 100
+	t.IdleConnTimeout = 90 * time.Second
+
+	client := &http.Client{
+		Timeout:   10 * time.Minute,
+		Transport: t,
+	}
+
 	return &Downloader{
 		OutputDir:   outputDir,
 		Concurrency: concurrency,
 		Limit:       limit,
 		SaveMeta:    saveMeta,
+		Client:      client,
 	}
 }
 
@@ -81,7 +97,11 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 		tasks = append(tasks, DownloadTask{Episode: ep, UniqueTitle: uniqueTitle})
 	}
 
-	// 3. 构建有缓冲通道控制协程并发数，使用 WaitGroup 同步
+	// 3. 构建有缓冲通道控制协程并发数，并初始化多路进度条管理器
+	p := mpb.NewWithContext(ctx,
+		mpb.WithWidth(60),
+		mpb.WithRefreshRate(180*time.Millisecond),
+	)
 	sem := make(chan struct{}, d.Concurrency)
 	var wg sync.WaitGroup
 
@@ -105,32 +125,48 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 			}()
 
 			// 执行单任务物理下载
-			if err := d.downloadEpisode(ctx, podcast.Title, podcastFolder, task.Episode, task.UniqueTitle); err != nil {
+			if err := d.downloadEpisode(ctx, p, podcast.Title, podcastFolder, task.Episode, task.UniqueTitle); err != nil {
 				// Avoid printing interruption errors when user hits Ctrl+C
 				if err != context.Canceled {
-					fmt.Printf("[下载失败] %s: %v\n", task.UniqueTitle, err)
+					fmt.Printf("\n[下载失败] %s: %v\n", task.UniqueTitle, err)
 				}
 			}
 		}(task)
 	}
 
 	wg.Wait()
+	p.Wait()
 	fmt.Println("\n[任务完成] 所有播客音频与 Shownotes 文字稿已全部处理完毕！")
 	return nil
 }
 
 // downloadEpisode 执行单个音频文件的断点续传下载，并导出 YAML 封装的 Markdown Shownotes。
-func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, podcastFolder string, ep parser.Episode, uniqueTitle string) error {
+func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podcastTitle string, podcastFolder string, ep parser.Episode, uniqueTitle string) error {
 	suffix := getSuffix(ep.AudioURL)
 	audioPath := filepath.Join(podcastFolder, uniqueTitle+suffix)
 	tempAudioPath := audioPath + ".downloading"
 	mdPath := filepath.Join(podcastFolder, uniqueTitle+".md")
 
+	// 0. 发起 HEAD 请求探测真实文件大小，修复 RSS 元数据与实际大小不符的死循环漏洞
+	headReq, err := http.NewRequestWithContext(ctx, "HEAD", ep.AudioURL, nil)
+	if err == nil {
+		headReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+		headResp, err := d.Client.Do(headReq)
+		if err == nil && headResp.StatusCode == http.StatusOK {
+			if headResp.ContentLength > 0 {
+				ep.Length = headResp.ContentLength
+			}
+		}
+		if headResp != nil && headResp.Body != nil {
+			headResp.Body.Close()
+		}
+	}
+
 	// 1. 保存 Shownotes (文字介绍) 为 Markdown
 	if d.SaveMeta {
 		if err := d.saveShownotes(mdPath, ep, uniqueTitle); err != nil {
 			// 容错：Shownotes 失败不应该打断音频的下载
-			fmt.Printf("[警告] 保存 Shownotes 失败 %s: %v\n", ep.Title, err)
+			fmt.Printf("\n[警告] 保存 Shownotes 失败 %s: %v\n", ep.Title, err)
 		}
 	}
 
@@ -167,45 +203,40 @@ func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, p
 		localSize = 0
 	}
 
-	// 3. 构建高颜值进度条
+	// 3. 构建多行并发安全的进度条
 	barDescription := fmt.Sprintf("[下载中] %s", uniqueTitle)
-	if len([]rune(barDescription)) > 40 {
-		barDescription = string([]rune(barDescription)[:37]) + "..."
+	if len([]rune(barDescription)) > 30 {
+		barDescription = string([]rune(barDescription)[:27]) + "..."
 	}
 
-	bar := progressbar.NewOptions64(
-		ep.Length,
-		progressbar.OptionSetDescription(barDescription),
-		progressbar.OptionSetWriter(os.Stderr),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionSetWidth(12),
-		progressbar.OptionThrottle(100*time.Millisecond),
-		progressbar.OptionShowCount(),
-		progressbar.OptionOnCompletion(func() {
-			fmt.Fprint(os.Stderr, "\n")
-		}),
-		progressbar.OptionFullWidth(),
+	bar := p.AddBar(ep.Length,
+		mpb.PrependDecorators(
+			decor.Name(barDescription, decor.WC{W: 32}),
+			decor.CountersKibiByte("% .2f / % .2f", decor.WCSyncSpace),
+		),
+		mpb.AppendDecorators(
+			decor.EwmaETA(decor.ET_STYLE_GO, 90),
+			decor.Name(" ] "),
+			decor.Percentage(decor.WCSyncSpace),
+		),
 	)
+
 	// 补足断点续传的初始进度
 	if localSize > 0 {
-		bar.Add64(localSize)
+		bar.SetCurrent(localSize)
 	}
 
 	// 4. 发起 HTTP GET 请求，配置 Range 头
-	client := &http.Client{
-		Timeout: 10 * time.Minute, // 10分钟超时保障大音频不被掐断
-	}
-
 	req, err := http.NewRequestWithContext(ctx, "GET", ep.AudioURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create http request: %w", err)
 	}
-	req.Header.Set("User-Agent", "xyz-dl/0.0.1 (Go-HTTP-Client; cross-platform)")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
 	if localSize > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", localSize))
 	}
 
-	resp, err := client.Do(req)
+	resp, err := d.Client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -223,7 +254,7 @@ func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, p
 			// 重新拉取没有 Range 头的连接
 			req.Header.Del("Range")
 			resp.Body.Close()
-			resp, err = client.Do(req)
+			resp, err = d.Client.Do(req)
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
@@ -234,7 +265,7 @@ func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, p
 			if resp.StatusCode != http.StatusOK {
 				return fmt.Errorf("http server returned status: %d %s", resp.StatusCode, resp.Status)
 			}
-			bar.Reset()
+			bar.SetCurrent(0)
 		}
 	} else {
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
@@ -249,9 +280,12 @@ func (d *Downloader) downloadEpisode(ctx context.Context, podcastTitle string, p
 	}
 	defer out.Close()
 
+	proxyReader := bar.ProxyReader(resp.Body)
+	defer proxyReader.Close()
+
 	// 使用 io.CopyBuffer 提升 I/O 性能 (1MB buffer)
 	buf := make([]byte, 1024*1024)
-	_, err = io.CopyBuffer(out, io.TeeReader(resp.Body, bar), buf)
+	_, err = io.CopyBuffer(out, proxyReader, buf)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
