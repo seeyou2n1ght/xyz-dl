@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,9 @@ import (
 	"xyz-dl/pkg/parser"
 	"xyz-dl/pkg/utils"
 
+	"github.com/Sorrow446/go-mp4tag"
+	md "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/bogem/id3v2"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 )
@@ -80,22 +84,31 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 	fmt.Printf("[保存路径] %s\n", podcastFolder)
 	fmt.Printf("[并发上限] %d 任务同行\n\n", d.Concurrency)
 
-	// 智能去重机制 (Smart Deduplication)
-	seenTitles := make(map[string]int)
+	// 并提前拉取播客封面至内存
+	var coverPicture []byte
+	if podcast.ImageURL != "" {
+		ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
+		req, err := http.NewRequestWithContext(ctxTimeout, "GET", podcast.ImageURL, nil)
+		if err == nil {
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+			resp, err := d.Client.Do(req)
+			if err == nil && resp.StatusCode == 200 {
+				coverPicture, _ = io.ReadAll(resp.Body)
+			}
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+		}
+		cancel()
+	}
+
 	type DownloadTask struct {
 		Episode     parser.Episode
 		UniqueTitle string
 	}
 	var tasks []DownloadTask
 	for _, ep := range episodes {
-		cleanTitle := utils.SanitizeFilename(ep.Title)
-		count := seenTitles[cleanTitle]
-		seenTitles[cleanTitle]++
-
-		uniqueTitle := cleanTitle
-		if count > 0 {
-			uniqueTitle = fmt.Sprintf("%s (%d)", cleanTitle, count)
-		}
+		uniqueTitle := utils.SanitizeFilename(ep.Title)
 		tasks = append(tasks, DownloadTask{Episode: ep, UniqueTitle: uniqueTitle})
 	}
 
@@ -132,7 +145,7 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 			}()
 
 			// 执行单任务物理下载
-			if err := d.downloadEpisode(ctx, p, podcast.Title, podcastFolder, task.Episode, task.UniqueTitle); err != nil {
+			if err := d.downloadEpisode(ctx, p, podcast, podcastFolder, task.Episode, task.UniqueTitle, coverPicture); err != nil {
 				mu.Lock()
 				failedEpisodes = append(failedEpisodes, task.Episode)
 				mu.Unlock()
@@ -151,8 +164,9 @@ func (d *Downloader) DownloadPodcast(ctx context.Context, podcast *parser.Podcas
 	return failedEpisodes, nil
 }
 
-// downloadEpisode 执行单个音频文件的断点续传下载，并导出 YAML 封装的 Markdown Shownotes。
-func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podcastTitle string, podcastFolder string, ep parser.Episode, uniqueTitle string) (err error) {
+// downloadEpisode 负责单个音频的并发安全拉取。
+// 支持断点续传、异常截断规避、Markdown Shownotes 存档及 ID3 元数据打入。
+func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podcast *parser.Podcast, podcastFolder string, ep parser.Episode, uniqueTitle string, coverPicture []byte) (err error) {
 	suffix := getSuffix(ep.AudioURL)
 	audioPath := filepath.Join(podcastFolder, uniqueTitle+suffix)
 	tempAudioPath := audioPath + ".downloading"
@@ -256,22 +270,46 @@ func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podca
 		bar.SetCurrent(localSize)
 	}
 
-	// 4. 发起 HTTP GET 请求，配置 Range 头
-	req, err := http.NewRequestWithContext(ctx, "GET", ep.AudioURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create http request: %w", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-	if localSize > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", localSize))
-	}
+	// 4. 发起 HTTP GET 请求，配置 Range 头，并引入 429/403 退避抖动重试环
+	var req *http.Request
+	var resp *http.Response
+	maxRetries := 3
 
-	resp, err := d.Client.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	for i := 0; i <= maxRetries; i++ {
+		req, err = http.NewRequestWithContext(ctx, "GET", ep.AudioURL, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create http request: %w", err)
 		}
-		return fmt.Errorf("http transfer error: %w", err)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+		if localSize > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", localSize))
+		}
+
+		resp, err = d.Client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("http transfer error: %w", err)
+		}
+
+		// 触发限流防御
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
+			resp.Body.Close()
+			if i < maxRetries {
+				// 退避策略：基础 3 秒 + 最大 2 秒的随机抖动 Jitter
+				jitter := time.Duration(rand.Intn(2000)) * time.Millisecond
+				sleepDur := 3*time.Second + jitter
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(sleepDur):
+				}
+				continue
+			}
+			return fmt.Errorf("http server returned status: %d %s (after %d retries)", resp.StatusCode, resp.Status, maxRetries)
+		}
+		break // 成功获取响应，跳出重试环
 	}
 	defer resp.Body.Close()
 
@@ -333,6 +371,58 @@ func (d *Downloader) downloadEpisode(ctx context.Context, p *mpb.Progress, podca
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
+	// 8. 强行烙印媒体标签
+	ext := strings.ToLower(filepath.Ext(audioPath))
+	if ext == ".mp3" {
+		tag, err := id3v2.Open(audioPath, id3v2.Options{Parse: true})
+		if err == nil {
+			defer tag.Close()
+			tag.SetTitle(ep.Title)
+			tag.SetArtist(podcast.Author)
+			tag.SetAlbum(podcast.Title)
+			if len(coverPicture) > 0 {
+				mimeType := "image/jpeg"
+				if strings.HasPrefix(podcast.ImageURL, "https://") && strings.HasSuffix(strings.ToLower(podcast.ImageURL), ".png") {
+					mimeType = "image/png"
+				}
+				pic := id3v2.PictureFrame{
+					Encoding:    id3v2.EncodingUTF8,
+					MimeType:    mimeType,
+					PictureType: id3v2.PTFrontCover,
+					Description: "Front Cover",
+					Picture:     coverPicture,
+				}
+				tag.AddAttachedPicture(pic)
+			}
+			tag.Save()
+		}
+	} else if ext == ".m4a" {
+		mp4, err := mp4tag.Open(audioPath)
+		if err == nil {
+			defer mp4.Close()
+			tags, err := mp4.Read()
+			if err != nil {
+				tags = &mp4tag.MP4Tags{}
+			}
+			tags.Title = ep.Title
+			tags.Artist = podcast.Author
+			tags.Album = podcast.Title
+			if len(coverPicture) > 0 {
+				imgType := mp4tag.ImageTypeJPEG
+				if strings.HasPrefix(podcast.ImageURL, "https://") && strings.HasSuffix(strings.ToLower(podcast.ImageURL), ".png") {
+					imgType = mp4tag.ImageTypePNG
+				}
+				tags.Pictures = []*mp4tag.MP4Picture{
+					{
+						Format: imgType,
+						Data:   coverPicture,
+					},
+				}
+			}
+			_ = mp4.Write(tags, nil)
+		}
+	}
+
 	return nil
 }
 
@@ -341,6 +431,13 @@ func (d *Downloader) saveShownotes(mdPath string, ep parser.Episode, uniqueTitle
 	// 防御：若 Shownotes 已经存在，则无需重复写入
 	if _, err := os.Stat(mdPath); err == nil {
 		return nil
+	}
+
+	// 利用 html-to-markdown 引擎洗刷脏乱的 HTML
+	cleanDesc, err := md.ConvertString(ep.Description)
+	if err != nil || cleanDesc == "" {
+		// 回退到原始数据
+		cleanDesc = ep.Description
 	}
 
 	content := fmt.Sprintf(`---
@@ -356,7 +453,7 @@ exportTime: %q
 ## 单集介绍 (Shownotes)
 
 %s
-`, uniqueTitle, ep.PubDate, ep.AudioURL, ep.Length, time.Now().Format("2006-01-02 15:04:05"), uniqueTitle, ep.Description)
+`, uniqueTitle, ep.PubDate, ep.AudioURL, ep.Length, time.Now().Format("2006-01-02 15:04:05"), uniqueTitle, cleanDesc)
 
 	return os.WriteFile(mdPath, []byte(content), 0644)
 }
